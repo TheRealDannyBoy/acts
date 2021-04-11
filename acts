@@ -194,10 +194,29 @@ fi
 backuprc=0 # Notice any failed backups
 backuplist="" # Maintain list of successfully created archives
 for dir in $backuptargets; do
+    # Check if this directory is to be backed up from a ZFS snapshot
+    snaptype="${dir%:*}"
+    dir="${dir#zfs:}"
+    backuproot="/"
+
     log_debug "message=\"Starting backup of $dir\""
     archive_starttime=$(date +%s)
     nicedirname=$(prettyprint archive_dirname "$dir")
     logdirname=$(prettyprint log_dirname "$dir")
+
+    if [ "$snaptype" = "zfs" ]; then
+        zfsinfo=$(zfs list -Ho name,mountpoint $dir)
+        dataset=$(echo "$zfsinfo" | cut -f1)
+        mountpoint=$(echo "$zfsinfo" | cut -f2)
+        snaptime="$mountpoint/snaptime-$today"
+        backuproot="$mountpoint/.zfs/snapshot/acts"
+
+        log_verbose "snapshot-create fs=zfs dir=$logdirname name=$dataset@acts-$today"
+        touch "$snaptime"
+        tarsnapbackupoptions="--snaptime \"$snaptime\" $tarsnapbackupoptions"
+        zfs snapshot "$dataset@acts-$today"
+        zfs set snapdir=visible "$dataset" # Make sure Tarsnap can see the snapshot directory
+    fi
 
     dailyarchive="$hostname-daily-$today$nicedirname"
     monthlyarchive="$hostname-monthly-$today$nicedirname"
@@ -206,7 +225,7 @@ for dir in $backuptargets; do
     log_verbose "backup-start  type=daily dir=/$dir name=$dailyarchive"
     # Uncontrolled expansion is bad, but we have little choice. See https://github.com/koalaman/shellcheck/wiki/Sc2086
     # shellcheck disable=SC2086
-    if output="$(calltarsnap -c -f "$dailyarchive" -C / $tarsnapbackupoptions "$dir" 2>&1)"; then
+    if output="$(calltarsnap -c -f "$dailyarchive" -C "$backuproot" $tarsnapbackupoptions "$dir" 2>&1)"; then
         backuplist="$backuplist $dailyarchive"
     else
         log_output=$(prettyprint log_output "$output")
@@ -214,6 +233,13 @@ for dir in $backuptargets; do
         backuprc=1
     fi
     archive_endtime=$(date +%s)
+
+    if [ "$snaptype" = "zfs" ]; then
+        log_verbose "snapshot-destroy fs=zfs dir=$logdirname name=$dataset@acts-$today"
+        zfs destroy "$dataset@acts"
+        rm $snaptime
+    fi
+
     log_verbose "backup-finish type=daily dir=$logdirname duration=$((archive_endtime - archive_starttime))s"
 
     # Determine whether other backup levels need to be created too
